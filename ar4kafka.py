@@ -19,7 +19,7 @@ import threading
 class Replicate4Kafka():
     '''从kafka读取replicate数据，并应用至目标数据库'''
 
-    # 目标数据库配置
+    # 目标数据库配置,使用时需要在外围配置
     targetdb = {
         "type" : "oracle",
         "tns"  : "192.168.0.108:1521/test",
@@ -35,16 +35,17 @@ class Replicate4Kafka():
         "database":"testdb"
     }
 
-
     # 映射配置
     tablemapping = {
         "prefix" : "K_"
     }
 
+    # 要复制的表清单，使用前需要在外围复制,不再清单中的table，将不会被处理
     tblist = ['ARTEST','ARTEST2']
     #metadata dict
     metalist = {}
 
+    #程序所在路径
     __scriptPath = os.path.split(os.path.realpath(__file__))[0]
 
     def __getLog(self,log, logname, level=logging.DEBUG):
@@ -79,22 +80,25 @@ class Replicate4Kafka():
             except Exception,e:
                 self.logger.error('connect to target database error:%s' % (str(e)))
                 sys.exit(1)
+        else:
+            self.logger.error('not support database type %s'
+                              %(self.targetdb['type']))
+            sys.exit(1)
 
         return db
 
 
     def __init__(self,dtopic='ARDATA',mtopic='ARMSG',
-                 kafkaserver='127.0.0.1:9092',groupid='ar-group', logfix='1'):
-        #multiprocessing.Process.__init__(self)
-        #self.stop_event = multiprocessing.Event()
+                 kafkaserver='127.0.0.1:9092',groupid='ar-group',
+                 logfix='1'):
         self.stopflag = multiprocessing.Value('i',0)
 
         self.loggerbase = self.__getLog('kafka',
                                         os.path.join(self.__scriptPath,'kafka'+str(logfix)+'.log') ,
                                         level=logging.WARNING)
-        self.logger = self.__getLog('arforkafka',
+        self.logger = self.__getLog('arconsumer',
                                     os.path.join(self.__scriptPath,'repkafka'+str(logfix)+'.log'),
-                                    level=logging.DEBUG)
+                                    level=logging.INFO)
         self.datalog = self.__getLog('data', os.path.join(self.__scriptPath,
                                      'exception'+str(logfix)+'.log'),
                                      level=logging.INFO)
@@ -102,16 +106,19 @@ class Replicate4Kafka():
         self.messagetopic = mtopic
         self.server = kafkaserver
         self.groupid = groupid
-        self.consumer_timeout = 60
+        self.consumer_timeout = 5
         self.autooffset = 'latest'
+
 
     def stop(self):
         self.logger.info('revice stop signal,set stopflag to 1')
         self.stopflag.value = 1
         #self.stop_event.set()
 
+
     def __del__(self):
         self.logger.info('task finish')
+
 
     def __getTargetTableNm(self, table):
         '''根据转换规则获取目标表名'''
@@ -119,15 +126,19 @@ class Replicate4Kafka():
 
 
     def __putMetaList(self, table, meta):
+        '''将元数据信息插入元数据列表'''
         self.metalist[table] = meta
 
+
     def putAllMetaList(self):
+        '''将所有table的元数据信息插入元数据字典'''
         for t in self.tblist:
             mt = self.getTargetMeta(self.__getTargetTableNm(t))
             self.__putMetaList(t,mt)
 
+
     def getTargetMeta(self, table):
-        '''get table metadata'''
+        '''get table metadata with database type'''
         """
         tbMeta={
             "col" : [ {"name":"id", "type":"number" } ],
@@ -202,7 +213,9 @@ class Replicate4Kafka():
 
         return tbMeat
 
+
     def __transDataType(self,dbtype,coltype,data):
+        '''根据数据库类型进行类型转换'''
         if dbtype == 'oracle':
             if coltype in ['CHAR','VARCHAR','VARCHAR2','NCHAR','NVARCHAR2']:
                 value = data
@@ -223,10 +236,10 @@ class Replicate4Kafka():
                 value = data
         return value
 
-    def splitData(self, d):
-        #获取表名
-        #pdb.set_trace()
 
+    def splitData(self, d):
+        '''拆分数据'''
+        #获取表名
         key = d.key
         tbnm = key.split('+')[1]
         #获取元数据
@@ -252,10 +265,11 @@ class Replicate4Kafka():
                     if opbeforedt:
                         #如果有befordata
                         blist.append(self.__transDataType(self.targetdb['type'],c['type'],opbeforedt[c['name']]))
+
         return tbnm,op,flist,dlist,blist
 
 
-    def __makeIsql(self,tb,op,fieldlist):
+    def __makeIsql(self, tb, op, fieldlist):
         '''生成insert sql语句'''
         sql = ""
         flist = ','.join(fieldlist)
@@ -267,7 +281,8 @@ class Replicate4Kafka():
         sql = "insert into %s(%s) values(%s) " % (self.__getTargetTableNm(tb), flist ,plist)
         return sql
 
-    def __makeDsql(self,tb,op, fieldlist,datalist):
+
+    def __makeDsql(self,tb, op, fieldlist,datalist):
         '''生成DELETE sql语句'''
         meta = self.metalist[tb]
         if meta['pk']:
@@ -308,7 +323,6 @@ class Replicate4Kafka():
                 self.logger.debug('%s,%s'%(sql[0], sql[1]))
                 cursor.execute(sql[0],sql[1])
             rs = True
-            #self.db.commit()
         except Exception, e:
             self.logger.error(str(e))
             self.datalog.error('%s,%s,%s' % (sql[0],str(sql[1]),str(e)))
@@ -339,14 +353,17 @@ class Replicate4Kafka():
                         self.logger.warn('skip data %s' % (m.value))
                         #跳过后续逻辑
                         continue
-                    if v['magic'] == 'atMSG' and v['type']=='DT':
+                    if 'magic' in v.keys() and v['magic'] == 'atMSG' and v['type']=='DT':
+                        #拆分数据
                         tb,op,flist,data,beforedata = self.splitData(m)
-                        self.logger.debug('consumer %d find data %s ,split to %s,%s,%s' 
-                                          % (pnum, m.value,tb,op,str(data)))
-                        self.__post2Target1by1(cursor,tb,op,flist,data,beforedata)
-                        self.logger.info('consumer %d post data %s,%s,%s' %
-                                          (pnum,tb,op,str(data)))
-                        self.transRecordCount[pnum] += 1
+                        #如果在表清单中，则处理
+                        if tb in self.tblist:
+                            self.logger.debug('consumer %d find data %s ,split to %s,%s,%s' 
+                                              % (pnum, m.value,tb,op,str(data)))
+                            self.__post2Target1by1(cursor,tb,op,flist,data,beforedata)
+                            self.logger.info('consumer %d post data %s,%s,%s' %
+                                              (pnum,tb,op,str(data)))
+                            self.transRecordCount[pnum] += 1
             db.commit()
             c.commit()
             self.logger.info('consumer %d commit postdata' % (pnum))
@@ -355,6 +372,7 @@ class Replicate4Kafka():
         c.close()
 
     def __getPartitions(self):
+        '''获取topic的partition'''
         c = KafkaConsumer(self.datatopic, group_id=self.groupid,
                           bootstrap_servers=self.server,
                           #consumer_timeout_ms=self.consumer_timeout*1000,
@@ -365,6 +383,7 @@ class Replicate4Kafka():
         return p
 
     def run(self):
+        '''多线程并行消费数据'''
         self.putAllMetaList()
         self.threadpool = []
         partations = self.__getPartitions()
@@ -375,13 +394,58 @@ class Replicate4Kafka():
             th.start()
             self.threadpool.append(th)
 
+    def activeConsumer(self):
+        '''返回活动consumer的数量'''
+        cnt = 0
+        for p in self.threadpool:
+            if p.is_alive():
+                cnt += 1
+        return cnt
+
+
+    def showConsumerStatus(self,normal=True):
+        if normal:
+            num = 0
+            for p in self.threadpool:
+                print p.name, p.is_alive(),self.transRecordCount[num]
+                num += 1
+            print '--------------------------------------'
+        else:
+            show=''
+            num = 0
+            for p in self.threadpool:
+                tmp = '%s is %s[%d]' % (p.name, str(p.is_alive()), self.transRecordCount[num])
+                num +=1
+                show = show + tmp +';'
+
+            sys.stdout.write(show+"\r")
+            sys.stdout.flush()
 
 
 if __name__ == "__main__":
+    #从配置文件读取配置
+    f = open('./kafka2oracle.json')
+    config = json.load(f)
+    #print config
     #init object
-    c=Replicate4Kafka(dtopic='ARDATA',kafkaserver='192.168.0.122:9092',
-                      groupid='ar-group',logfix=str(1))
+    c=Replicate4Kafka(dtopic=config['datatopic'],
+                      kafkaserver=config['kafkaserver'],
+                      groupid=config['groupid'])
+    #c=Replicate4Kafka(dtopic='ARDATA',kafkaserver='192.168.0.122:9092', groupid='ar-group',logfix=str(1))
+    c.targetdb = config['targetdb']
+    # 映射配置
+    c.tablemapping = config['tablemapping']
+    #c.tablemapping = {
+    #    "prefix" : "K_"
+    #}
+    # 要复制的table
+    c.tblist = config['tblist']
+    #c.tblist = ['ARTEST','ARTEST2']
+    c.consumer_timeout = 5
 
+
+
+    # 处理ctrl+c事件，停止consumer运行
     def shutdown(sig, frame):
         print 'Signal handler called with signal', sig
         c.stop()
@@ -389,31 +453,8 @@ if __name__ == "__main__":
     #signal.signal(signal.SIGQUIT,sigHandler)
     #signal.signal(signal.SIGTERM,sigHandler)
 
-    #oracle target setting
-    c.targetdb = {
-        "type" : "oracle",
-        "tns"  : "192.168.0.108:1521/test",
-        "user" : "test",
-        "passwd" : "test"
-    }
 
 
-    # 映射配置
-    c.tablemapping = {
-        "prefix" : "K_"
-    }
-    # 要复制的table
-    c.tblist = ['ARTEST','ARTEST2']
-
-    #mysql target setting
-    c.targetdb = {
-        "type" : "mysql",
-        "ip"  : "192.168.0.108",
-        "user" : "root",
-        "passwd" : "Xy123456*",
-        "database":"testdb"
-    }
-    c.consumer_timeout = 5
 
     #测试非线程使用
     #print c.getTargetMeta('k_artest')
@@ -424,15 +465,8 @@ if __name__ == "__main__":
     c.run()
     st = time.time()
     while True:
-        stopnum=0
-        num = 0
-        for p in c.threadpool:
-            print p.name, p.is_alive(),c.transRecordCount[num]
-            num += 1
-            if not p.is_alive():
-                stopnum += 1
-        print '--------------------------------------'
-        if stopnum == 5: break
+        c.showConsumerStatus(False)
+        if c.activeConsumer() == 0: break
         time.sleep(2)
     print time.time()-st
 
