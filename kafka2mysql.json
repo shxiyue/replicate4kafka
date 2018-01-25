@@ -1,0 +1,19 @@
+{
+    "kafkaserver":"192.168.0.122:9092",
+    "datatopic"  : "ARDATA",
+    "groupid"    : "ar-group",
+    "targetdb"   : {
+        "type" : "mysql",
+        "tns" : "192.168.0.108",
+        "user" : "root",
+        "passwd":"Xy123456*",
+        "database":"testdb"
+    },
+    "tablemapping":{
+        "prefix" : "K_"
+    },
+    "tblist" : [
+        "ARTEST",
+        "ARTEST2"
+    ]
+}
