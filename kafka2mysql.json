@@ -15,5 +15,12 @@
     "tblist" : [
         "ARTEST",
         "ARTEST2"
-    ]
+    ],
+    "kafkaconsumer_setting":{
+        "fetch_max_bytes" : 52428800,
+        "max_poll_records":10000,
+        "receive_buffer_bytes" : 32768,
+        "max_partition_fetch_bytes" :2097152,
+        "autooffset" :"earliest"
+    }
 }

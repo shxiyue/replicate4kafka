@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from kafka import KafkaConsumer
-import json
+#import json
+import ujson as json
 import cx_Oracle
 import MySQLdb
 #from kafka import TopicPartition
@@ -108,6 +109,11 @@ class Replicate4Kafka():
         self.groupid = groupid
         self.consumer_timeout = 5
         self.autooffset = 'latest'
+        self.autooffset = 'earliest'
+        self.fetch_max_bytes = 52428800
+        self.max_poll_records = 10000
+        self.receive_buffer_bytes = 32768
+        self.max_partition_fetch_bytes = 1024*1024
 
 
     def stop(self):
@@ -220,18 +226,18 @@ class Replicate4Kafka():
             if coltype in ['CHAR','VARCHAR','VARCHAR2','NCHAR','NVARCHAR2']:
                 value = data
             elif coltype == 'DATE' :
-                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S') 
+                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S')
             elif coltype == 'TIMESTAMP':
-                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S') 
+                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S')
             else:
                 value = data
         elif dbtype == 'mysql':
             if coltype.upper() in ['CHAR','VARCHAR','VARCHAR2','NCHAR','NVARCHAR2']:
                 value = data
             elif coltype.upper() == 'DATETIME' :
-                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S') 
+                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S')
             elif coltype == 'TIMESTAMP':
-                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S') 
+                value = datetime.datetime.strptime(data, '%Y-%m-%d %H:%M:%S')
             else:
                 value = data
         return value
@@ -330,25 +336,33 @@ class Replicate4Kafka():
 
 
     def readDataByBatch(self, pnum):
+        # 获取数据库链接
         db= self.__getTargetDB()
         cursor = db.cursor()
+        # 连接kafka
         c = KafkaConsumer(self.datatopic, group_id=self.groupid,
                           bootstrap_servers=self.server,
                           #consumer_timeout_ms=self.consumer_timeout*1000,
                           enable_auto_commit  = False,
-                          fetch_max_bytes = 100*1024*1024,
-                          max_poll_records = 5000,
-                          receive_buffer_bytes  = 32768*4,
+                          fetch_max_bytes = self.fetch_max_bytes,
+                          max_poll_records = self.max_poll_records,
+                          receive_buffer_bytes  = self.receive_buffer_bytes,
+                          max_partition_fetch_bytes = self.max_partition_fetch_bytes,
                           auto_offset_reset=self.autooffset)
         self.logger.info('start batch consumer with pnum:%d' %(pnum))
         self.logger.debug('timeout is setting:%d' %(self.consumer_timeout))
+
+        # 循环读取数据
         while self.stopflag.value == 0:
+            onebatch_RepCount = self.transRecordCount[pnum]
+            onebatch_KafkaCount = 0
             r = c.poll(timeout_ms=self.consumer_timeout*1000,max_records=10000)
             for x,message in r.items():
                 for m in message:
                     try:
                         #尝试转换为json格式，并判断是否是ＡＲ数据
                         v = json.loads(m.value)
+                        onebatch_KafkaCount +=1
                     except:
                         self.logger.warn('skip data %s' % (m.value))
                         #跳过后续逻辑
@@ -361,15 +375,22 @@ class Replicate4Kafka():
                             self.logger.debug('consumer %d find data %s ,split to %s,%s,%s' 
                                               % (pnum, m.value,tb,op,str(data)))
                             self.__post2Target1by1(cursor,tb,op,flist,data,beforedata)
-                            self.logger.info('consumer %d post data %s,%s,%s' %
+                            self.logger.debug('consumer %d post data %s,%s,%s' %
                                               (pnum,tb,op,str(data)))
                             self.transRecordCount[pnum] += 1
-            db.commit()
-            c.commit()
-            self.logger.info('consumer %d commit postdata' % (pnum))
+
+            # 如果有要复制或读取的变化量，相应提交
+            if self.transRecordCount[pnum] - onebatch_RepCount > 0:
+                db.commit()
+            if onebatch_KafkaCount > 0 :
+                c.commit()
+            self.logger.info('consumer %d read %d Records,commit %d Records' %
+                             (pnum,onebatch_KafkaCount,
+                              self.transRecordCount[pnum] - onebatch_RepCount))
         cursor.close()
         db.close()
         c.close()
+
 
     def __getPartitions(self):
         '''获取topic的partition'''
@@ -382,6 +403,7 @@ class Replicate4Kafka():
         c.close()
         return p
 
+
     def run(self):
         '''多线程并行消费数据'''
         self.putAllMetaList()
@@ -389,10 +411,11 @@ class Replicate4Kafka():
         partations = self.__getPartitions()
         self.transRecordCount = [0 for p in partations]
         for i in partations:
-            th = threading.Thread(target=self.readDataByBatch,args=(i,),name='consumer%d'%(i))
+            th = threading.Thread(target=self.readDataByBatch,args=(i,),name='c%d'%(i))
             th.setDaemon(True)
             th.start()
             self.threadpool.append(th)
+
 
     def activeConsumer(self):
         '''返回活动consumer的数量'''
@@ -422,27 +445,41 @@ class Replicate4Kafka():
             sys.stdout.flush()
 
 
-if __name__ == "__main__":
-    #从配置文件读取配置
-    f = open('./kafka2oracle.json')
-    config = json.load(f)
-    #print config
-    #init object
-    c=Replicate4Kafka(dtopic=config['datatopic'],
-                      kafkaserver=config['kafkaserver'],
-                      groupid=config['groupid'])
-    #c=Replicate4Kafka(dtopic='ARDATA',kafkaserver='192.168.0.122:9092', groupid='ar-group',logfix=str(1))
-    c.targetdb = config['targetdb']
-    # 映射配置
-    c.tablemapping = config['tablemapping']
-    #c.tablemapping = {
-    #    "prefix" : "K_"
-    #}
-    # 要复制的table
-    c.tblist = config['tblist']
-    #c.tblist = ['ARTEST','ARTEST2']
-    c.consumer_timeout = 5
+    def loadConfig(self, cfgfile):
+        f = open(cfgfile)
+        try:
+            cfg = json.load(f)
+            if 'datatopic' in cfg.keys(): self.datatopic = cfg['datatopic']
+            #self.messagetopic = cfg[]
+            if 'kafkaserver' in cfg.keys(): self.server = cfg['kafkaserver']
+            if 'groupid' in cfg.keys():     self.groupid = cfg['groupid']
+            #self.consumer_timeout = 5
+            if 'autooffset' in cfg.keys(): self.autooffset = cfg['autooffset']
+            if 'targetdb' in cfg.keys(): self.targetdb = cfg['targetdb']
+            if 'tablemapping' in cfg.keys(): self.tablemapping = cfg['tablemapping']
+            if 'tblist' in cfg.keys(): self.tblist = cfg['tblist']
+            if 'kafkaconsumer_setting' in cfg.keys():
+               if 'fetch_max_bytes' in cfg['kafkaconsumer_setting'].keys():
+                   self.fetch_max_bytes = cfg['kafkaconsumer_setting']['fetch_max_bytes']
+               if 'max_poll_records' in cfg['kafkaconsumer_setting'].keys():
+                   self.max_poll_records = cfg['kafkaconsumer_setting']['max_poll_records']
+               if 'receive_buffer_bytes' in cfg['kafkaconsumer_setting'].keys():
+                   self.receive_buffer_bytes = cfg['kafkaconsumer_setting']['receive_buffer_bytes']
+               if 'max_partition_fetch_bytes' in cfg['kafkaconsumer_setting'].keys():
+                   self.max_partition_fetch_bytes = cfg['kafkaconsumer_setting']['max_partition_fetch_bytes']
+        except Exception,e:
+            print 'read config file error',str(e)
+            sys.exit(1)
+        finally:
+            f.close()
 
+
+
+if __name__ == "__main__":
+    #init object
+    c=Replicate4Kafka()
+    #从配置文件读取配置
+    c.loadConfig('./kafka2oracle.json')
 
 
     # 处理ctrl+c事件，停止consumer运行

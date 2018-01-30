@@ -3,6 +3,7 @@
 1. pip install kafka-python
 2. pip install mysql-python
 3. pip install cx_Oracle
+4. pip install ujson
 
 
 # 基础说明
@@ -12,7 +13,11 @@
 4. 数据源的日志要完整，即befor image中要包含update的所有字段信息而不是只有更新的部分
 5. 根据调用时的配置，决定读取指定表的变化量，而不是topic中所有的变化量
 
-
+# 20180130优化
+1. 增添loadConfig方法，从配置文件读取配置
+2. 使用ujson替换json ,提高json.loads性能
+3. 每一次pool操作后，只有拿到变化量才进行commit操作
+4. 增添max_partition_fetch_bytes的使用，调整此参数，可每次多pool一些数据，减少交互的时间开销
 
 
 # 待完善
