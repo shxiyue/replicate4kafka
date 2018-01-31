@@ -446,6 +446,7 @@ class Replicate4Kafka():
             sys.stdout.write(show+"\r")
             sys.stdout.flush()
         elif showcase ==3:
+            # 使用curses对象绘制状态
             num = 0
             for p in self.threadpool:
                 tmp = '%s is %s[%d]' % (p.name, str(p.is_alive()), self.transRecordCount[num])
@@ -490,7 +491,6 @@ if __name__ == "__main__":
     #从配置文件读取配置
     c.loadConfig('./kafka2oracle.json')
 
-
     # 处理ctrl+c事件，停止consumer运行
     def shutdown(sig, frame):
         print 'Signal handler called with signal', sig
@@ -498,8 +498,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT,shutdown)
     #signal.signal(signal.SIGQUIT,sigHandler)
     #signal.signal(signal.SIGTERM,sigHandler)
-
-
 
 
     #测试非线程使用
