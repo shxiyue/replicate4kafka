@@ -15,6 +15,7 @@ import signal
 import os
 import pdb
 import threading
+from cMonitor import monitor
 
 
 class Replicate4Kafka():
@@ -114,6 +115,7 @@ class Replicate4Kafka():
         self.max_poll_records = 10000
         self.receive_buffer_bytes = 32768
         self.max_partition_fetch_bytes = 1024*1024
+        self.mon = monitor()
 
 
     def stop(self):
@@ -426,14 +428,14 @@ class Replicate4Kafka():
         return cnt
 
 
-    def showConsumerStatus(self,normal=True):
-        if normal:
+    def showConsumerStatus(self,showcase=1):
+        if showcase == 1:
             num = 0
             for p in self.threadpool:
                 print p.name, p.is_alive(),self.transRecordCount[num]
                 num += 1
             print '--------------------------------------'
-        else:
+        elif showcase == 2:
             show=''
             num = 0
             for p in self.threadpool:
@@ -443,6 +445,13 @@ class Replicate4Kafka():
 
             sys.stdout.write(show+"\r")
             sys.stdout.flush()
+        elif showcase ==3:
+            num = 0
+            for p in self.threadpool:
+                tmp = '%s is %s[%d]' % (p.name, str(p.is_alive()), self.transRecordCount[num])
+                self.mon.display_info(tmp,0,num+5)
+                num +=1
+
 
 
     def loadConfig(self, cfgfile):
@@ -502,7 +511,7 @@ if __name__ == "__main__":
     c.run()
     st = time.time()
     while True:
-        c.showConsumerStatus(False)
+        c.showConsumerStatus(3)
         if c.activeConsumer() == 0: break
         time.sleep(2)
     print time.time()-st
